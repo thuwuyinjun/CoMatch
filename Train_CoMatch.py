@@ -21,6 +21,8 @@ import torch.nn.functional as F
 from WideResNet import WideResnet
 from datasets.cifar import get_train_loader, get_val_loader
 from utils import accuracy, setup_default_logging, AverageMeter, WarmupCosineLrScheduler
+from losses import *
+
 
 import tensorboard_logger 
 
@@ -89,6 +91,7 @@ def train_one_epoch(epoch,
     
     epoch_start = time.time()  # start time
     dl_x, dl_u = iter(dltrain_x), iter(dltrain_u)
+    criterion_base = SupConLoss(temperature=args.temperature)
     for it in range(n_iters):
         ims_x_weak, lbs_x = next(dl_x)
         (ims_u_weak, ims_u_strong0, ims_u_strong1), lbs_u_real = next(dl_u)
@@ -150,17 +153,34 @@ def train_one_epoch(epoch,
         sim = torch.exp(torch.mm(feats_u_s0, feats_u_s1.t())/args.temperature) 
         sim_probs = sim / sim.sum(1, keepdim=True)
         
-        # pseudo-label graph with self-loop
-        Q = torch.mm(probs, probs.t())       
-        Q.fill_diagonal_(1)    
-        pos_mask = (Q>=args.contrast_th).float()
+
+        if not args.contrastive:
+            # pseudo-label graph with self-loop
+            Q = torch.mm(probs, probs.t())       
+            Q.fill_diagonal_(1)    
+            pos_mask = (Q>=args.contrast_th).float()
+                
+            Q = Q * pos_mask
+            Q = Q / Q.sum(1, keepdim=True)
             
-        Q = Q * pos_mask
-        Q = Q / Q.sum(1, keepdim=True)
-        
-        # contrastive loss
-        loss_contrast = - (torch.log(sim_probs + 1e-7) * Q).sum(1)
-        loss_contrast = loss_contrast.mean()  
+            # contrastive loss
+            loss_contrast = - (torch.log(sim_probs + 1e-7) * Q).sum(1)
+            loss_contrast = loss_contrast.mean()
+        else:
+            
+            # features, origin_features = model.feature_forward(inputs, return_feat = True)
+            # features = model.feature_forward(mixed_input[0])
+            features = features.unsqueeze(1)
+            pseudo_label0 = torch.softmax(logits_u_w, dim=1)
+            pseudo_label1 = torch.softmax(logits_u_s0, dim=1)
+            pseudo_label2 = torch.softmax(logits_u_s1, dim=1)
+            mixed_target = torch.cat([F.one_hot(lbs_x,num_classes=pseudo_label0.shape[1]), pseudo_label0, pseudo_label1, pseudo_label2])
+            curr_mixed_target, features = transform_prob_model_out(features, args, mixed_target)
+            if features.shape[0] <= 0:
+                meta_train_loss0 = 0
+            else:
+                meta_train_loss0 = criterion_base(features, None, weight_mat = curr_mixed_target)
+            loss_contrast = args.lam_c*args.contrastive_gamma*meta_train_loss0
         
         # unsupervised classification loss
         loss_u = - torch.sum((F.log_softmax(logits_u_s0,dim=1) * probs),dim=1) * mask                
@@ -180,8 +200,9 @@ def train_one_epoch(epoch,
         loss_x_meter.update(loss_x.item())
         loss_u_meter.update(loss_u.item())
         loss_contrast_meter.update(loss_contrast.item())
-        mask_meter.update(mask.mean().item())       
-        pos_meter.update(pos_mask.sum(1).float().mean().item())
+        mask_meter.update(mask.mean().item())
+        if not args.contrastive:   
+            pos_meter.update(pos_mask.sum(1).float().mean().item())
         
         corr_u_lb = (lbs_u_guess == lbs_u_real).float() * mask
         n_correct_u_lbs_meter.update(corr_u_lb.sum().item())
@@ -227,6 +248,28 @@ def evaluate(model, ema_model, dataloader):
 
     return top1_meter.avg, ema_top1_meter.avg
 
+
+def transform_prob_model_out(features, args, curr_double_supcon_weight_mat):
+  
+    most_certain_samples = (torch.max(curr_double_supcon_weight_mat, dim = 1)[0] > args.certain_thres).view(-1)
+    # most_certain_samples0 = most_certain_samples[0:bsz]
+    # most_certain_samples1 = most_certain_samples[bsz:]
+    # if args.unlabeled:
+    #     most_certain_samples0 = torch.logical_or(torch.logical_and(most_certain_samples0, (labels < 0).view(-1)), (labels >= 0).view(-1))
+    #     most_certain_samples1 = torch.logical_or(torch.logical_and(most_certain_samples1, (labels < 0).view(-1)), (labels >= 0).view(-1))
+    most_certain_samples = most_certain_samples.nonzero().view(-1)
+    # most_certain_samples1 = most_certain_samples1.nonzero().view(-1)
+
+    curr_double_supcon_weight_mat = curr_double_supcon_weight_mat[most_certain_samples]
+    # curr_double_supcon_weight_mat1 = curr_double_supcon_weight_mat1[most_certain_samples1]
+    features = features[most_certain_samples]
+    # print("most certain sample count::", len(most_certain_samples))
+    # labels0 = labels0[most_certain_samples]
+    # labels1 = labels1[most_certain_samples]
+
+    # curr_double_supcon_weight_mat = torch.cat([curr_double_supcon_weight_mat0, curr_double_supcon_weight_mat1])
+    
+    return curr_double_supcon_weight_mat, features
 
 def main():
     parser = argparse.ArgumentParser(description='CoMatch Cifar Training')
@@ -277,6 +320,14 @@ def main():
                         help='number of batches stored in memory bank')    
     parser.add_argument('--exp-dir', default='CoMatch', type=str, help='experiment id')
     parser.add_argument('--checkpoint', default='', type=str, help='use pretrained model')
+
+    parser.add_argument('--contrastive', action='store_true', help='add contrastive loss')
+    parser.add_argument('--contrastive_gamma', default=0.5, type=float)
+    # parser.add_argument('--contrastive_temp', default=0.1, type=float, help='sup-cl temperature')
+    parser.add_argument('--certain_thres', default=0.5, type=float, metavar='N',
+                    help='train batchsize')
+    # 
+    parser.add_argument('--load_cached_idxs', action='store_true', help='add contrastive loss')
     
     args = parser.parse_args()
     
@@ -301,7 +352,7 @@ def main():
         sum(p.numel() for p in model.parameters()) / 1e6))
 
     dltrain_x, dltrain_u = get_train_loader(
-        args.dataset, args.batchsize, args.mu, n_iters_per_epoch, L=args.n_labeled, root=args.root, method='comatch')
+        args.dataset, args.batchsize, args.mu, n_iters_per_epoch, L=args.n_labeled, root=args.root, method='comatch', load_cached_idxs=args.load_cached_idxs)
     dlval = get_val_loader(dataset=args.dataset, batch_size=64, num_workers=2, root=args.root)
 
     wd_params, non_wd_params = [], []

@@ -34,7 +34,7 @@ class ThreeCropsTransform:
         x3 = self.trans_strong1(x)
         return [x1, x2, x3]
 
-def load_data_train(L=250, dataset='CIFAR10', dspth='./data'):
+def load_data_train(L=250, dataset='CIFAR10', dspth='./data', load_cached_idxs = False):
     if dataset == 'CIFAR10':
         datalist = [
             osp.join(dspth, 'cifar-10-batches-py', 'data_batch_{}'.format(i + 1))
@@ -59,10 +59,22 @@ def load_data_train(L=250, dataset='CIFAR10', dspth='./data'):
     labels = np.concatenate(labels, axis=0)
     n_labels = L // n_class
     data_x, label_x, data_u, label_u = [], [], [], []
+    if load_cached_idxs:
+        labeled_indices_map = torch.load(osp.join(dspth, "labeled_indices_map"))
+        unlabeled_indices_map = torch.load(osp.join(dspth, "unlabeled_indices_map"))
+    else:
+        labeled_indices_map = dict()
+        unlabeled_indices_map = dict()
     for i in range(n_class):
-        indices = np.where(labels == i)[0]
-        np.random.shuffle(indices)
-        inds_x, inds_u = indices[:n_labels], indices[n_labels:]
+        if not load_cached_idxs:
+            indices = np.where(labels == i)[0]
+            np.random.shuffle(indices)
+            inds_x, inds_u = indices[:n_labels], indices[n_labels:]
+            labeled_indices_map[i] = inds_x
+            unlabeled_indices_map[i] = inds_u
+        else:
+            inds_x = labeled_indices_map[i]
+            inds_u = unlabeled_indices_map[i]
         data_x += [
             data[i].reshape(3, 32, 32).transpose(1, 2, 0)
             for i in inds_x
@@ -73,6 +85,9 @@ def load_data_train(L=250, dataset='CIFAR10', dspth='./data'):
             for i in inds_u
         ]
         label_u += [labels[i] for i in inds_u]
+    if not load_cached_idxs:
+        torch.save(labeled_indices_map, osp.join(dspth, "labeled_indices_map"))
+        torch.save(unlabeled_indices_map, osp.join(dspth, "unlabeled_indices_map"))
     return data_x, label_x, data_u, label_u
 
 
@@ -178,8 +193,8 @@ class Cifar(Dataset):
         return leng
 
 
-def get_train_loader(dataset, batch_size, mu, n_iters_per_epoch, L, root='data', method='comatch'):
-    data_x, label_x, data_u, label_u = load_data_train(L=L, dataset=dataset, dspth=root)
+def get_train_loader(dataset, batch_size, mu, n_iters_per_epoch, L, root='data', method='comatch', load_cached_idxs = False):
+    data_x, label_x, data_u, label_u = load_data_train(L=L, dataset=dataset, dspth=root, load_cached_idxs=load_cached_idxs)
 
     ds_x = Cifar(
         dataset=dataset,
