@@ -12,9 +12,9 @@ def setup_default_logging(args, default_level=logging.INFO,
                           format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s"):
     
     if 'CIFAR' in args.dataset:      
-        output_dir = os.path.join(args.dataset, f'x{args.n_labeled}_seed{args.seed}', args.exp_dir)
+        output_dir = os.path.join(args.root, f'x{args.n_labeled}_seed{args.seed}', args.exp_dir)
     else:
-        output_dir = os.path.join(args.dataset, f'f{args.folds}', args.exp_dir)
+        output_dir = os.path.join(args.root, f'f{args.folds}', args.exp_dir)
         
     os.makedirs(output_dir, exist_ok=True)
 
