@@ -168,6 +168,20 @@ def train_one_epoch(epoch,
             loss_contrast = loss_contrast.mean()
         else:
             
+            if args.add_self_sup:
+                Q = torch.zeros_like(sim_probs)      
+                Q.fill_diagonal_(1)    
+                # pos_mask = (Q>=args.contrast_th).float()
+                    
+                # Q = Q * pos_mask
+                # Q = Q / Q.sum(1, keepdim=True)
+                
+                # contrastive loss
+                loss_contrast = - (torch.log(sim_probs + 1e-7) * Q).sum(1)
+                loss_contrast = args.lam_c*loss_contrast.mean()
+            else:
+                loss_contrast = 0
+            
             # features, origin_features = model.feature_forward(inputs, return_feat = True)
             # features = model.feature_forward(mixed_input[0])
             features = features.unsqueeze(1)
@@ -180,7 +194,7 @@ def train_one_epoch(epoch,
                 meta_train_loss0 = 0
             else:
                 meta_train_loss0 = criterion_base(features, None, weight_mat = curr_mixed_target)
-            loss_contrast = args.lam_c*args.contrastive_gamma*meta_train_loss0
+            loss_contrast += args.lam_c*args.contrastive_gamma*meta_train_loss0
         
         # unsupervised classification loss
         loss_u = - torch.sum((F.log_softmax(logits_u_s0,dim=1) * probs),dim=1) * mask                
@@ -251,7 +265,7 @@ def evaluate(model, ema_model, dataloader):
 
 def transform_prob_model_out(features, args, curr_double_supcon_weight_mat):
   
-    most_certain_samples = (torch.max(curr_double_supcon_weight_mat, dim = 1)[0] > args.certain_thres).view(-1)
+    most_certain_samples = (torch.max(curr_double_supcon_weight_mat, dim = 1)[0] > args.contrast_th).view(-1)
     # most_certain_samples0 = most_certain_samples[0:bsz]
     # most_certain_samples1 = most_certain_samples[bsz:]
     # if args.unlabeled:
@@ -322,6 +336,8 @@ def main():
     parser.add_argument('--checkpoint', default='', type=str, help='use pretrained model')
 
     parser.add_argument('--contrastive', action='store_true', help='add contrastive loss')
+    parser.add_argument('--add_self_sup', action='store_true', help='add contrastive loss')
+    # add_self_sup
     parser.add_argument('--contrastive_gamma', default=0.5, type=float)
     # parser.add_argument('--contrastive_temp', default=0.1, type=float, help='sup-cl temperature')
     parser.add_argument('--certain_thres', default=0.5, type=float, metavar='N',
